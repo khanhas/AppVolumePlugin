@@ -64,7 +64,8 @@ StringType = Filepath
 ## Bangs
 Both parent and child:
 - `!CommandMeasure MeasureName "Update"`  
-  You can use this bang after change measure option so you do not have to set `DynamicVariables = 1`
+  You can use this bang after changing measure option so you do not have to set `DynamicVariables = 1`
+  Eg: `LeftMouseUpAction = [!SetOption AppIndex2 NumType Volume][!CommandMeasure AppIndex2 "Update"]`
   
 Only child:
 - `!CommandMeasure MeasureName "SetVolume x"`
@@ -119,7 +120,7 @@ AntiAlias = 1
 
 ## AppVolume example skin
 In release page, I included an example skin pack, you can download, examine and then make your own skin.  
-![ExampleSkinDemo] (https://raw.githubusercontent.com/khanhas/AppVolumePlugin/master/AppVolumeExampleSkin/demo.png)
+![ExampleSkinDemo](https://raw.githubusercontent.com/khanhas/AppVolumePlugin/master/AppVolumeExampleSkin/demo.png)
 
 ## Credit:
 Big thanks to [theAzack9](https://github.com/TheAzack9) and [tjhrulz](https://github.com/tjhrulz) who helped me get through some C++ stuff that I'm too noob to understand. I can't finish this one without them.
