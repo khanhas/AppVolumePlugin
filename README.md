@@ -1,5 +1,9 @@
 # AppVolume Plugin for Rainmeter
-
+[![GitHub release](https://img.shields.io/github/release/khanhas/AppVolumePlugin
+.svg?colorB=97CA00?label=version)](https://github.com/khanhas/AppVolumePlugin
+/releases/latest) [![Github All Releases](https://img.shields.io/github/downloads/khanhas/AppVolumePlugin
+/total.svg?colorB=97CA00)](https://github.com/khanhas/AppVolumePlugin
+/releases) 
 A plugin that extend Rainmeter functionality: Get apps volume and peak level, control apps volume and mute.
 
 ## Parent measure
