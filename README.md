@@ -25,12 +25,12 @@ Options:
   You have to set this to Parent measure name.  
   
 - `Index` *(default = 0)*  
-  Index of app you want to get infomation and control. It has to be in range from 1 to number value of Parent measure.  
+  Index of app you want to get information and control. It has to be in range from 1 to number value of Parent measure.  
   
 - `AppName`  
-  Specific name of app you want to get infomation and control. You need to include app name and its extension.  
+  Specific name of app you want to get information and control. You need to include app name and its extension.  
   Eg: `Spotify.exe`, `AIMP.exe`  
-  If this option is not empty and `Index` is also set, it overides `Index` option.  
+  If this option is not empty and `Index` is also set, it overrides `Index` option.  
   
 - `NumberType` *(default = volume)*  
   Value you want to return in number value of measure.
