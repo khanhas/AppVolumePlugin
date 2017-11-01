@@ -3,13 +3,19 @@
 A plugin that extend Rainmeter functionality: Get apps volume and peak level, control apps volume and mute.
 
 ## Parent measure
-Option:  
+Options:  
 - `IgnoreSystemSound` *(default = 1)*  
   System sound is Windows notification sound.  
   Set to 0 to include System Sound. Set to 1 to skip System Sound.
 
-Number value: Total number of apps. You can use this value to generate enough child measures and prevent out of range error.  
-String value: Current device name.
+- `ExcludeApp`  
+  Set a blacklist of apps you do not want to control or care.  
+  You need to include apps name and their extension, separate them by `;`.
+  Eg: `ExcludeApp = rainmeter.exe;firefox.exe`
+
+Measure value:  
+Number: Total number of apps. You can use this value to generate enough child measures and prevent out of range error.  
+String: Current device name.
 
 Example:
 ```ini
@@ -40,6 +46,10 @@ Options:
   Value you want to return in string value of measure.
   Valid options are `filename` or `filepath`.  
   
+Measure value:  
+Number: Depend on what you set in `NumberType`, it return current app volume or peak level.   
+String: Depend on what you set in `StringType`, it return current app only file name or full path.  
+  
 Example:  
 ```ini
 [AppIndex2]
@@ -68,11 +78,9 @@ Both parent and child:
   Eg: `LeftMouseUpAction = [!SetOption AppIndex2 NumType Volume][!CommandMeasure AppIndex2 "Update"]`
   
 Only child:
-- `!CommandMeasure MeasureName "SetVolume x"`
-  Set app volume to *x* (from 0 to 100).  
-  
-- `!CommandMeasure MeasureName "ChangeVolume x"`
-  Change the volume by *x*. You can use negative numbers to decrease volume.  
+- `!CommandMeasure MeasureName "SetVolume x"`  
+  *x* can be a absolute value (`SetVolume 50` to set volume to 50%)  
+  Or a relative value (`SetVolume +20` to increase volume by 20% or `SetVolume -40` to decrease volume by 40%)
 
 - `!CommandMeasure MeasureName "Mute"`
   Mute app.
