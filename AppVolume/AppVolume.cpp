@@ -8,6 +8,8 @@
 #include <Psapi.h>
 #include <vector>
 #include "..\..\API\RainmeterAPI.h"
+#include <Strsafe.h>
+#include <algorithm>
 
 #define SAFE_RELEASE(punk)  \
 			  if ((punk) != nullptr) { (punk)->Release(); (punk) = nullptr; }
@@ -44,6 +46,7 @@ struct ParentMeasure
 	ChildMeasure* ownerChild;
 	BOOL ignoreSystemSound;
 	std::vector<AppSession*> SessionCollection;
+	std::vector<std::wstring> excludeList;
 	ParentMeasure() :
 		skin(nullptr),
 		name(),
@@ -63,7 +66,6 @@ struct ChildMeasure
 	BOOL isParent;
 	int indexNum;
 	std::wstring indexApp;
-	
 	ChildMeasure() :
 		indexType(NOINDEXTYPE),
 		numtype(NONUMTYPE),
@@ -77,28 +79,26 @@ struct ChildMeasure
 
 struct AppSession
 {
-	IAudioMeterInformation * peak = nullptr;
-	ISimpleAudioVolume * volume = nullptr;
-	BOOL mute = false;
-	DWORD processID = NULL;
+	std::vector<IAudioMeterInformation *> peak;
+	std::vector<ISimpleAudioVolume *> volume;
+	std::vector<DWORD> processID;
+	BOOL mute;
 	std::wstring appPath = L"";
 	std::wstring appName = L"";
-	
+	GUID groupID;
 };
 
 static BOOL com_initialized = FALSE;
 const static CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
 const static IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
 const static IID IID_SessionManager2 = __uuidof(IAudioSessionManager2);
-const static IID IID_SAV = __uuidof(ISimpleAudioVolume);
 BOOL InitCom(ParentMeasure* measure);
 BOOL UpdateList(ParentMeasure* measure);
-
+void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList);
 IMMDeviceEnumerator * pEnumerator = nullptr;
-std::wstring deviceName = L"";
+std::wstring deviceName;
 
 std::vector<ParentMeasure*> g_ParentMeasures;
-
 
 BOOL InitCom(ParentMeasure* measure)
 {
@@ -109,13 +109,13 @@ BOOL InitCom(ParentMeasure* measure)
 		return false;
 	}
 
-	if (!SUCCEEDED(CoCreateInstance(CLSID_MMDeviceEnumerator, 0, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void**)&pEnumerator)))
+	if (FAILED(CoCreateInstance(CLSID_MMDeviceEnumerator, 0, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void**)&pEnumerator)))
 	{
 		RmLog(LOG_ERROR, L"AppVolume.dll: COM creation failed");
 		return false;
 	}
 	
-	if (!SUCCEEDED(UpdateList(measure)))
+	if (FAILED(UpdateList(measure)))
 		return false;
 
 	CoUninitialize();
@@ -129,7 +129,7 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
 	*data = child;
 
 	void* skin = RmGetSkin(rm);
-
+	
 	std::wstring parentName = RmReadString(rm, L"Parent", L"");
 	if (parentName.empty())
 	{
@@ -138,8 +138,6 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
 		child->parent->skin = skin;
 		child->parent->rm = rm;
 		child->parent->ownerChild = child;
-		child->parent->ignoreSystemSound = RmReadInt(rm, L"IgnoreSystemSound", 1) == 1;
-		child->parent->initErr = !InitCom(child->parent);
 		g_ParentMeasures.push_back(child->parent);
 		child->isParent = true;
 	}
@@ -161,13 +159,45 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
 	}
 }
 
+void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList)
+{
+	std::wstring tempList = list;
+	size_t start = 0;
+	size_t end = tempList.find(L";", 0);
+	
+	while (end != std::wstring::npos)
+	{
+		start = tempList.find_first_not_of(L" \t\r\n", start);
+		std::wstring element = tempList.substr(start, end - start);
+		element.erase(element.find_last_not_of(L" \t\r\n") + 1);
+
+		if (!element.empty())
+		{
+			vectorList.push_back(element);
+		}
+		start = end + 1;
+		end = tempList.find(L";", start);
+	}
+
+	if (start < tempList.length())
+	{
+		start = tempList.find_first_not_of(L" \t\r\n", start);
+		std::wstring element = tempList.substr(start, tempList.length() - start);
+		element.erase(element.find_last_not_of(L" \t\r\n") + 1);
+
+		if (!element.empty())
+		{
+			vectorList.push_back(element);
+		}		
+	}
+}
 BOOL UpdateList(ParentMeasure* measure)
 {
 	IMMDevice * pDevice = nullptr;
 	if (SUCCEEDED(pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice)))
 	{
 		IAudioSessionManager2 * sessManager = nullptr;
-		if (SUCCEEDED(pDevice->Activate(IID_SessionManager2, 7, 0, (void**)&sessManager)))
+		if (SUCCEEDED(pDevice->Activate(IID_SessionManager2, CLSCTX_ALL, NULL, (void**)&sessManager)))
 		{
 			IPropertyStore * pProps = nullptr;
 			if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pProps)))
@@ -182,104 +212,206 @@ BOOL UpdateList(ParentMeasure* measure)
 				SAFE_RELEASE(pProps);
 			}
 			SAFE_RELEASE(pDevice);
+			
 			IAudioSessionEnumerator * sessEnum = nullptr;
+
 			if (SUCCEEDED(sessManager->GetSessionEnumerator(&sessEnum)))
 			{
 				SAFE_RELEASE(sessManager);
-				std::vector<AppSession*>::const_iterator iter = measure->SessionCollection.begin();
-				for (; iter != measure->SessionCollection.end(); ++iter)
+				
+				for (auto &sessIter : measure->SessionCollection)
 				{
-					SAFE_RELEASE((*iter)->volume);
-					SAFE_RELEASE((*iter)->peak);
-					delete *iter;
+					for (auto &volIter : sessIter->volume)
+						SAFE_RELEASE(volIter);
+					sessIter->volume.clear();
+
+					for (auto &peakIter : sessIter->peak)
+						SAFE_RELEASE(peakIter);
+					sessIter->peak.clear();
+					sessIter->processID.clear();
 				}
-				int sessionCount = 0;
-				sessEnum->GetCount(&sessionCount);
 				measure->SessionCollection.clear();
 				measure->SessionCollection.shrink_to_fit();
+
+				int sessionCount = 0;
+				sessEnum->GetCount(&sessionCount);
+
+				//Go through all sessions, group sessions that have same GUID,
+				//create new iter for uniquely found GUID.
 				for (int i = 0; i < sessionCount; i++)
 				{
 					AppSession * newAppSession = new AppSession;
 
 					IAudioSessionControl * sessControl = nullptr;
-					if (!SUCCEEDED(sessEnum->GetSession(i, &sessControl)))
+					if (FAILED(sessEnum->GetSession(i, &sessControl)))
+					{
+						delete newAppSession;
 						continue;
+					}
 
 					IAudioSessionControl2 * sessControl2 = nullptr;
-					if (!SUCCEEDED(sessControl->QueryInterface(&sessControl2)))
+					if (FAILED(sessControl->QueryInterface(&sessControl2)))
 					{
 						SAFE_RELEASE(sessControl);
+						delete newAppSession;
 						continue;
 					}
-						
-					LPWSTR sessInsID = L"";
-					if (!SUCCEEDED(sessControl2->GetSessionInstanceIdentifier(&sessInsID)))
-					{
-						SAFE_RELEASE(sessControl);
-						SAFE_RELEASE(sessControl2)
-						continue;
-					}
-
-					std::wstring findWeirdChar = sessInsID;
-					size_t weirdChar = findWeirdChar.find(L"#", 0);
-					CoTaskMemFree(sessInsID);
 
 					HRESULT isSystem = sessControl2->IsSystemSoundsSession();
-					if ((measure->ignoreSystemSound && isSystem == S_OK) ||
-						(weirdChar != std::wstring::npos && isSystem == S_FALSE))
+					if (measure->ignoreSystemSound && isSystem == S_OK)
 					{
 						SAFE_RELEASE(sessControl);
 						SAFE_RELEASE(sessControl2);
+						delete newAppSession;
 						continue;
 					}
-					
-					sessControl->QueryInterface(&newAppSession->volume);
-					sessControl->QueryInterface(&newAppSession->peak);
-					newAppSession->volume->GetMute(&newAppSession->mute);
 
-					sessControl2->GetProcessId(&newAppSession->processID);
+					DWORD procID;
+					sessControl2->GetProcessId(&procID);
 
-					SAFE_RELEASE(sessControl);
-					SAFE_RELEASE(sessControl2);
-
-					if (newAppSession->processID == 0)
+					if (procID == 0)
 					{
 						newAppSession->appPath = newAppSession->appName = L"System Sound";
 					}
 					else
 					{
-						HANDLE checkProc = OpenProcess(PROCESS_ALL_ACCESS, false, newAppSession->processID);
-						WCHAR procPath[400] = L"";
+						HANDLE checkProc = OpenProcess(PROCESS_ALL_ACCESS, false, procID);
+						WCHAR procPath[400];
+						procPath[0] = 0;
 						if (checkProc != NULL)
 						{
-							GetModuleFileNameEx(checkProc, NULL, procPath, 400 / sizeof(WCHAR));
+							GetModuleFileNameEx(checkProc, NULL, procPath, 400);
 						}
 						CloseHandle(checkProc);
-						newAppSession->appPath = procPath;
-						newAppSession->appName = PathFindFileName(newAppSession->appPath.c_str());
+
+						//Windows 7 doesn't kill session when process is closed.
+						//And it leaves various "ghost" processID that can't be get path.
+						//Use that to skip these kind of sessions.
+						if (procPath[0] == 0)
+						{
+							SAFE_RELEASE(sessControl);
+							SAFE_RELEASE(sessControl2);
+							delete newAppSession;
+							continue;
+						}
+						else
+						{
+							newAppSession->appPath = procPath;
+							newAppSession->appName = PathFindFileName(newAppSession->appPath.c_str());
+						}
+
+						BOOL found = FALSE;
+						for (auto app : measure->excludeList)
+						{
+							if (_wcsicmp(newAppSession->appName.c_str(), app.c_str()) == 0)
+							{
+								found = TRUE;
+							}
+						}
+						if (found)
+						{
+							SAFE_RELEASE(sessControl);
+							SAFE_RELEASE(sessControl2);
+							delete newAppSession;
+							continue;
+						}
 					}
+
+					GUID gID;
+					sessControl->GetGroupingParam(&gID);
+					
+					BOOL found = FALSE;
+					for (auto &check : measure->SessionCollection)
+					{
+						if (IsEqualGUID(gID, check->groupID))
+						{
+							ISimpleAudioVolume * iterVolume = nullptr;
+							if (SUCCEEDED(sessControl->QueryInterface(&iterVolume)))
+							{
+								check->volume.push_back(iterVolume);
+								BOOL iterMute;
+								iterVolume->GetMute(&iterMute);
+								check->mute = check->mute && iterMute;
+							}
+
+							IAudioMeterInformation * iterPeak = nullptr;
+							if (SUCCEEDED(sessControl->QueryInterface(&iterPeak)))
+								check->peak.push_back(iterPeak);
+
+							found = TRUE;
+							break;
+						}
+					}
+
+					if (found)
+					{
+						SAFE_RELEASE(sessControl);
+						SAFE_RELEASE(sessControl2);
+						delete newAppSession;
+						continue;
+					}
+
+					newAppSession->groupID = gID;
+					ISimpleAudioVolume * iterVolume = nullptr;
+					if (SUCCEEDED(sessControl->QueryInterface(&iterVolume)))
+					{
+						newAppSession->volume.push_back(iterVolume);
+						BOOL iterMute;
+						iterVolume->GetMute(&iterMute);
+						newAppSession->mute = iterMute;
+					}
+						
+					IAudioMeterInformation * iterPeak = nullptr;
+					if (SUCCEEDED(sessControl->QueryInterface(&iterPeak)))
+						newAppSession->peak.push_back(iterPeak);
+
+					SAFE_RELEASE(sessControl);
+					SAFE_RELEASE(sessControl2);
+
 					measure->SessionCollection.push_back(newAppSession);
 				}
+
 				SAFE_RELEASE(sessEnum);
+
+				for (auto &iter : measure->SessionCollection)
+				{
+					float maxVol = 0.0;
+					for (auto &volIter : iter->volume)
+					{
+						float vol;
+						volIter->GetMasterVolume(&vol);
+
+						if (vol > maxVol)
+							maxVol = vol;
+					}
+
+					for (auto &volIter : iter->volume)
+					{
+						volIter->SetMasterVolume(maxVol, NULL);
+						volIter->SetMute(iter->mute, NULL);
+					}
+
+				}
 			}
+
 			else
 			{
-				RmLog(LOG_ERROR, L"AppVolume.dll: Could not enumerate AudioSessionManager");
+				RmLog(LOG_DEBUG, L"AppVolume.dll: Could not enumerate AudioSessionManager");
 				return false;
 			}
 		}
 		else
 		{
-			RmLog(LOG_ERROR, L"AppVolume.dll: Could not activate AudioSessionManager");
+			SAFE_RELEASE(pDevice);
+			RmLog(LOG_DEBUG, L"AppVolume.dll: Could not activate AudioSessionManager");
 			return false;
 		}
 	}
 	else
 	{
-		RmLog(LOG_ERROR, L"AppVolume.dll: Could not get device");
+		RmLog(LOG_DEBUG, L"AppVolume.dll: Could not get device");
 		return false;
 	}
-	SAFE_RELEASE(pDevice);
 	return true;
 }
 
@@ -293,7 +425,13 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 
 	if (child->isParent)
 	{
+		child->parent->initErr = !InitCom(child->parent);
 		parent->ignoreSystemSound = RmReadInt(rm, L"IgnoreSystemSound", 1) == 1;
+		LPCWSTR excluding = RmReadString(rm, L"ExcludeApp", L"");
+		if (*excluding)
+		{
+			SeparateList(excluding, parent->excludeList);
+		}
 		return;
 	}
 	
@@ -356,7 +494,7 @@ PLUGIN_EXPORT double Update(void* data)
 			{
 				for (int i = 0; i < parent->SessionCollection.size(); i++)
 				{
-					if (_wcsicmp(parent->SessionCollection.at(i)->appName.c_str(), 
+					if (_wcsicmp(parent->SessionCollection.at(i)->appName.c_str(),
 						child->indexApp.c_str()) == 0)
 					{
 						child->indexNum = i;
@@ -369,14 +507,22 @@ PLUGIN_EXPORT double Update(void* data)
 			case VOLUME:
 			{
 				float vol = 0.0;
-				parent->SessionCollection.at(child->indexNum)->volume->GetMasterVolume(&vol);
+				parent->SessionCollection.at(child->indexNum)->volume[0]->GetMasterVolume(&vol);
 				return (parent->SessionCollection.at(child->indexNum)->mute ? -1 : (double)vol);
 			}
 
 			case PEAK:
 			{
 				float peak = 0.0;
-				parent->SessionCollection.at(child->indexNum)->peak->GetPeakValue(&peak);
+				for (auto &peakIter : parent->SessionCollection.at(child->indexNum)->peak)
+				{
+					float sessPeak;
+					peakIter->GetPeakValue(&sessPeak);
+					if (sessPeak > peak)
+					{
+						peak = sessPeak;
+					}
+				}
 				return (double)peak;
 			}
 			}
@@ -386,7 +532,6 @@ PLUGIN_EXPORT double Update(void* data)
 			return 0.0;
 		}
 	}
-
 	return (double)parent->SessionCollection.size();
 }
 
@@ -398,11 +543,9 @@ PLUGIN_EXPORT LPCWSTR GetString(void* data)
 	if (!parent || parent->initErr)
 		return L"Error";
 
-	std::wstring stringValue = L"";
-
 	if (child->isParent)
 	{
-		stringValue = deviceName;
+		return deviceName.c_str();
 	}
 		
 	else
@@ -412,9 +555,9 @@ PLUGIN_EXPORT LPCWSTR GetString(void* data)
 			switch (child->strtype)
 			{
 			case FILEPATH:
-				stringValue = parent->SessionCollection.at(child->indexNum)->appPath;
+				return parent->SessionCollection.at(child->indexNum)->appPath.c_str();
 			case FILENAME:
-				stringValue = parent->SessionCollection.at(child->indexNum)->appName;
+				return parent->SessionCollection.at(child->indexNum)->appName.c_str();
 			}
 		}
 		catch (const std::out_of_range&)
@@ -423,7 +566,7 @@ PLUGIN_EXPORT LPCWSTR GetString(void* data)
 		}
 	}
 
-	return stringValue.c_str();
+	return nullptr;
 }
 
 PLUGIN_EXPORT LPCWSTR GetVolumeFromIndex(void* data, const int argc, const WCHAR* argv[])
@@ -434,23 +577,25 @@ PLUGIN_EXPORT LPCWSTR GetVolumeFromIndex(void* data, const int argc, const WCHAR
 		int index = _wtoi(argv[0]);
 		if (index == 0)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetVolumeFromIndex(%s): Incorrect type or out of range. Please use integer and >= 1.", argv[0]);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
 			return L"0";
 		}
 		try
 		{
 			float vol = 0.0;
-			child->parent->SessionCollection.at(index)->volume->GetMasterVolume(&vol);
+			child->parent->SessionCollection.at(index - 1)->volume[0]->GetMasterVolume(&vol);
 			vol = (child->parent->SessionCollection.at(index - 1)->mute ? -1 : vol);
-			return std::to_wstring(vol).c_str();
+			static WCHAR result[7];
+			StringCchPrintf(result, 7, L"%f", vol);
+			return result;
 		}
 		catch (const std::out_of_range&)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetVolumeFromIndex(%d): Index is out of range", index);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(%d): Index is out of range", index);
 			return L"0";
 		}
 	}
-	RmLog(1, L"AppVolume.dll - GetVolumeFromIndex(...): Too many parameters. Please use one integer and >= 1.");
+	RmLog(LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
@@ -462,22 +607,32 @@ PLUGIN_EXPORT LPCWSTR GetPeakFromIndex(void* data, const int argc, const WCHAR* 
 		int index = _wtoi(argv[0]);
 		if (index == 0)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetPeakFromIndex(%s): Incorrect type or out of range. Please use integer and >= 1.", argv[0]);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
 			return L"0";
 		}
 		try
 		{
 			float peak = 0.0;
-			child->parent->SessionCollection.at(index - 1)->peak->GetPeakValue(&peak);
-			return std::to_wstring(peak).c_str();
+			for (auto &peakIter : child->parent->SessionCollection.at(index-1)->peak)
+			{
+				float sessPeak;
+				peakIter->GetPeakValue(&sessPeak);
+				if (sessPeak > peak)
+				{
+					peak = sessPeak;
+				}
+			}
+			static WCHAR result[7];
+			StringCchPrintf(result, 7, L"%f", peak);
+			return result;
 		}
 		catch (const std::out_of_range&)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetPeakFromIndex(%d): Index is out of range", index);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(%d): Index is out of range", index);
 			return L"0";
 		}
 	}
-	RmLog(1, L"AppVolume.dll - GetPeakFromIndex(...): Too many parameters. Please use one integer and >= 1.");
+	RmLog(LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
@@ -489,7 +644,7 @@ PLUGIN_EXPORT LPCWSTR GetFilePathFromIndex(void* data, const int argc, const WCH
 		int index = _wtoi(argv[0]);
 		if (index == 0)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetFilePathFromIndex(%s): Incorrect type or out of range. Please use integer and >= 1.", argv[0]);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFilePathFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
 			return L"0";
 		}
 		try
@@ -498,11 +653,11 @@ PLUGIN_EXPORT LPCWSTR GetFilePathFromIndex(void* data, const int argc, const WCH
 		}
 		catch (const std::out_of_range&)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetFilePathFromIndex(%d): Index is out of range", index);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFilePathFromIndex(%d): Index is out of range", index);
 			return L"0";
 		}
 	}
-	RmLog(1, L"AppVolume.dll - GetFilePathFromIndex(...): Too many parameters. Please use one integer and >= 1.");
+	RmLog(1, L"AppVolume.dll - GetFilePathFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
@@ -514,7 +669,7 @@ PLUGIN_EXPORT LPCWSTR GetFileNameFromIndex(void* data, const int argc, const WCH
 		int index = _wtoi(argv[0]);
 		if (index == 0)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetFileNameFromIndex(%s): Incorrect type or out of range. Please use integer and >= 1.", argv[0]);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
 			return L"0";
 		}
 		try
@@ -523,11 +678,11 @@ PLUGIN_EXPORT LPCWSTR GetFileNameFromIndex(void* data, const int argc, const WCH
 		}
 		catch (const std::out_of_range&)
 		{
-			RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetFileNameFromIndex(%d): Index is out of range", index);
+			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(%d): Index is out of range", index);
 			return L"0";
 		}
 	}
-	RmLog(1, L"AppVolume.dll - GetFileNameFromIndex(...): Too many parameters. Please use one integer and >= 1.");
+	RmLog(LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
@@ -544,21 +699,23 @@ PLUGIN_EXPORT LPCWSTR GetVolumeFromAppName(void* data, const int argc, const WCH
 				try
 				{
 					float vol = 0.0;
-					child->parent->SessionCollection.at(i)->volume->GetMasterVolume(&vol);
+					child->parent->SessionCollection.at(i)->volume[0]->GetMasterVolume(&vol);
 					vol = (child->parent->SessionCollection.at(i)->mute ? -1 : vol);
-					return std::to_wstring(vol).c_str();
+					static WCHAR result[7];
+					StringCchPrintf(result, 7, L"%f", vol);
+					return result;
 				}
 				catch (const std::out_of_range&)
 				{
-					RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
+					RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
 					return L"0";
 				}
 			}
 		}
-		RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
+		RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
 		return L"0";
 	}
-	RmLog(1, L"AppVolume.dll - GetVolumeFromAppName(...): Too many parameters. Please use one string.");
+	RmLog(LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(...): Incorrect number of parameters. Please use one string.");
 	return L"0";
 }
 
@@ -575,112 +732,135 @@ PLUGIN_EXPORT LPCWSTR GetPeakFromAppName(void* data, const int argc, const WCHAR
 				try
 				{
 					float peak = 0.0;
-					child->parent->SessionCollection.at(i)->peak->GetPeakValue(&peak);
-					return std::to_wstring(peak).c_str();
+					for (auto &peakIter : child->parent->SessionCollection.at(i)->peak)
+					{
+						float sessPeak;
+						peakIter->GetPeakValue(&sessPeak);
+						if (sessPeak > peak)
+						{
+							peak = sessPeak;
+						}
+					}
+					static WCHAR result[7];
+					StringCchPrintf(result, 7, L"%f", peak);
+					return result;
 				}
 				catch (const std::out_of_range&)
 				{
-					RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
+					RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
 					return L"0";
 				}
 			}
 		}
-		RmLogF(child->parent->rm, 1, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
+		RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
 		return L"0";
 	}
-	RmLog(1, L"AppVolume.dll - GetPeakFromAppName(...): Too many parameters. Please use one string.");
+	RmLog(LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(...): Incorrect number of parameters. Please use one string.");
 	return L"0";
 }
 
-//Based on Win7AudioPlugin
+//Based on NowPlaying plugin
 PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
 {
 	ChildMeasure* child = (ChildMeasure*)data;
 	ParentMeasure* parent = child->parent;
-	std::wstring wholeBang = args;
 
-	size_t pos = wholeBang.find(' ');
-	if (pos != -1)
+	if (_wcsicmp(args, L"Mute") == 0)
 	{
-		std::wstring bang = wholeBang.substr(0, pos);
-		wholeBang.erase(0, pos + 1);
-		if (_wcsicmp(bang.c_str(), L"SetVolume") == 0)
+		try
 		{
-			float volume = 0;
-			if (1 == swscanf_s(wholeBang.c_str(), L"%f", &volume))
+			for (auto &volIter : parent->SessionCollection.at(child->indexNum)->volume)
 			{
-				if (parent->SessionCollection.at(child->indexNum)->volume)
-				{
-					volume = (volume < 0 ? 0 : (volume > 100 ? 100 : volume)) / 100;
-					if (!SUCCEEDED(parent->SessionCollection.at(child->indexNum)->volume->SetMasterVolume(volume, NULL)))
-						RmLog(LOG_ERROR, L"AppVolume.dll: Error setting volume");
-				}
-				else
-					RmLog(LOG_ERROR, L"AppVolume.dll: Error getting app volume");
+				if (FAILED(volIter->SetMute(true, NULL)))
+					throw "error";
 			}
-			else
-				RmLog(LOG_WARNING, L"AppVolume.dll: Incorrect number of arguments for bang");
 		}
-		else if (_wcsicmp(bang.c_str(), L"ChangeVolume") == 0)
+		catch (...)
 		{
-			float offset = 0;
-			float volume = 0;
-			if (1 == swscanf_s(wholeBang.c_str(), L"%f", &offset))
+			RmLog(LOG_ERROR, L"AppVolume.dll: Error muting app");
+		}
+	}
+	else if (_wcsicmp(args, L"UnMute") == 0)
+	{
+		try
+		{
+			for (auto &volIter : parent->SessionCollection.at(child->indexNum)->volume)
 			{
-				if (parent->SessionCollection.at(child->indexNum)->volume)
-				{
-					parent->SessionCollection.at(child->indexNum)->volume->GetMasterVolume(&volume);
-					volume += offset / 100;
-					volume = volume < 0 ? 0 : (volume > 1 ? 1 : volume);
-					if (!SUCCEEDED(parent->SessionCollection.at(child->indexNum)->volume->SetMasterVolume(volume, NULL)))
-						RmLog(LOG_ERROR, L"AppVolume.dll: Error changing volume");
-				}
-				else
-					RmLog(LOG_ERROR, L"AppVolume.dll: Error getting app volume");
+				if (FAILED(volIter->SetMute(false, NULL)))
+					throw "error";
 			}
-			else
-				RmLog(LOG_WARNING, L"AppVolume.dll: Incorrect number of arguments for bang");
 		}
-		else
+		catch (...)
 		{
-			RmLog(LOG_WARNING, L"AppVolume.dll: Unknown bang");
+			RmLog(LOG_ERROR, L"AppVolume.dll: Error unmuting app");
 		}
 	}
-	else if (_wcsicmp(wholeBang.c_str(), L"ToggleMute") == 0)
+	else if (_wcsicmp(args, L"ToggleMute") == 0)
 	{
-		if (parent->SessionCollection.at(child->indexNum)->volume)
+		try
 		{
-			if (!SUCCEEDED(parent->SessionCollection.at(child->indexNum)->volume->SetMute(!parent->SessionCollection.at(child->indexNum)->mute, NULL)))
-				RmLog(LOG_ERROR, L"AppVolume.dll: Error toggling mute app");
+			BOOL curMute = parent->SessionCollection.at(child->indexNum)->mute;
+			for (auto &volIter : parent->SessionCollection.at(child->indexNum)->volume)
+			{
+				if (FAILED(volIter->SetMute(!curMute, NULL)))
+					throw "error";
+			}
+			parent->SessionCollection.at(child->indexNum)->mute = !curMute;
 		}
-		else
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error getting app mute status");
+		catch (...)
+		{
+			RmLog(LOG_ERROR, L"AppVolume.dll: Error toggling mute app");
+		}
 	}
-	else if (_wcsicmp(wholeBang.c_str(), L"Mute") == 0)
+	else if (_wcsicmp(args, L"Update") == 0)
 	{
-		if (parent->SessionCollection.at(child->indexNum)->volume)
-		{
-			if (!SUCCEEDED(parent->SessionCollection.at(child->indexNum)->volume->SetMute(true, NULL)))
-				RmLog(LOG_ERROR, L"AppVolume.dll: Error muting app");
-		}
-		else
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error getting app mute status");
-	}
-	else if (_wcsicmp(wholeBang.c_str(), L"Unmute") == 0)
-	{
-		if (parent->SessionCollection.at(child->indexNum)->volume)
-		{
-			if (!SUCCEEDED(parent->SessionCollection.at(child->indexNum)->volume->SetMute(false, NULL)))
-				RmLog(LOG_ERROR, L"AppVolume.dll: Error unmuting app");
-		}
-		else
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error getting app mute status");
-	}
-	else if (_wcsicmp(wholeBang.c_str(), L"Update") == 0)
 		Reload(data, parent->rm, NULL);
+	}
 	else
-		RmLog(LOG_WARNING, L"AppVolume.dll: Unknown bang");
+	{
+		LPCWSTR arg = wcschr(args, L' ');
+		if (_wcsnicmp(args, L"SetVolume", 9) == 0)
+		{
+			try
+			{
+				float argNum = _wtof(arg);
+				float volume = 0.0;
+				if (arg[1] == L'+' || arg[1] == L'-')
+				{
+					// Relative to current volume
+					if (FAILED(parent->SessionCollection.at(child->indexNum)->volume[0]->GetMasterVolume(&volume)))
+						throw "error";
+
+					volume += argNum / 100;
+				}
+				else
+					volume = argNum / 100;
+				if (volume < 0)
+					volume = 0.0;
+				else if (volume > 1)
+					volume = 1.0;
+				BOOL curMute;
+				parent->SessionCollection.at(child->indexNum)->volume[0]->GetMute(&curMute);
+				for (auto &volIter : parent->SessionCollection.at(child->indexNum)->volume)
+				{
+					if (FAILED(volIter->SetMasterVolume(volume, NULL)))
+						throw "error";
+					if (curMute)
+						if (FAILED(volIter->SetMute(FALSE, NULL)))
+							throw "error";
+				}
+					
+			}
+			catch (...)
+			{
+				RmLog(LOG_ERROR, L"AppVolume.dll: Error setting volume");
+			}
+		}
+		else
+			RmLog(LOG_WARNING, L"AppVolume.dll: Unknown bang");
+	}
 }
+
 PLUGIN_EXPORT void Finalize(void* data)
 {
 	ChildMeasure* child = (ChildMeasure*)data;
@@ -690,11 +870,10 @@ PLUGIN_EXPORT void Finalize(void* data)
 		std::vector<ParentMeasure*>::iterator iter = std::find(g_ParentMeasures.begin(), g_ParentMeasures.end(), parent);
 		g_ParentMeasures.erase(iter);
 		parent->SessionCollection.clear();
+		SAFE_RELEASE(pEnumerator);
 		delete parent;
 	}
-	SAFE_RELEASE(pEnumerator);
 
-	deviceName = L"";
 	delete child;
 	if (com_initialized) CoUninitialize();
 	com_initialized = FALSE;

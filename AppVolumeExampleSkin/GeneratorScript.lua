@@ -1,6 +1,7 @@
 function Initialize()
 	measureName = SKIN:GetMeasure(SELF:GetOption('MeasureName'))
 	autoRefresh = SELF:GetOption('AutoRefresh')*1 == 1
+	Generate(measureName:GetValue())
 end
 
 function Generate(num)
@@ -15,21 +16,24 @@ function Generate(num)
 		error("Could not open inc file.")
 		return
 	end
-
-	for i = 1, num do
-		local sec, secCount = SELF:GetOption('S1'), 1
-		while sec and sec ~= '' do
-			file:write('[', sec:gsub('%%%%', i), ']\n')
-			local key, keyCount = SELF:GetOption('S' .. secCount .. 'K1'), 1
-			while key and key ~= '' do
-				key = key:gsub('%%%%', i)
-
-				file:write(key:gsub('%%%%', i):gsub('{.-}', parseFormula), '\n')
-				keyCount = keyCount + 1
-				key = SELF:GetOption('S' .. secCount .. 'K' .. keyCount)
+	if num == 0 then
+		-- Clear file
+		file:write("")
+	else
+		for i = 1, num do
+			local sec, secCount = SELF:GetOption('S1'), 1
+			while sec and sec ~= '' do
+				file:write('[', sec:gsub('%%%%', i), ']\n')
+				local key, keyCount = SELF:GetOption('S' .. secCount .. 'K1'), 1
+				while key and key ~= '' do
+					key = key:gsub('%%%%', i)
+					file:write(key:gsub('%%%%', i):gsub('{.-}', parseFormula), '\n')
+					keyCount = keyCount + 1
+					key = SELF:GetOption('S' .. secCount .. 'K' .. keyCount)
+				end
+				secCount = secCount + 1
+				sec = SELF:GetOption('S' .. secCount)
 			end
-			secCount = secCount + 1
-			sec = SELF:GetOption('S' .. secCount)
 		end
 	end
 	file:close()
