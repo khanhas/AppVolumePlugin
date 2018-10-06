@@ -35,3 +35,5 @@
 
 .vs/
 AppVolume/dist/
+AppVolume/obj/
+AppVolume/bin/

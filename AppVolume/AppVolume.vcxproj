@@ -71,9 +71,11 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(ProjectDir)\dist\x64\</OutDir>
+    <IntDir>.\obj\$(PlatformTarget)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>$(ProjectDir)\dist\x86\</OutDir>
+    <OutDir>$(ProjectDir)\dist\$(PlatformTarget)\</OutDir>
+    <IntDir>.\obj\$(PlatformTarget)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -114,6 +116,9 @@
     <BuildLog>
       <Path />
     </BuildLog>
+    <PostBuildEvent>
+      <Command>xcopy "$(TargetDir)$(TargetFileName)" ".\bin\$(PlatformTarget)\" /Y</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -138,17 +143,18 @@
       <Command>taskkill /f /fi "imagename eq Rainmeter.exe"</Command>
     </PreBuildEvent>
     <PostBuildEvent>
-      <Command>xcopy "$(TargetDir)$(TargetFileName)" "%25appdata%25\Rainmeter\Plugins" /Y</Command>
+      <Command>xcopy "$(TargetDir)$(TargetFileName)" "%25appdata%25\Rainmeter\Plugins" /Y
+xcopy "$(TargetDir)$(TargetFileName)" ".\bin\$(PlatformTarget)\" /Y</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AppVolume.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="resource.h" />
+    <ResourceCompile Include="AppVolume.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="AppVolume.rc" />
+    <ClInclude Include="AppVolume.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
