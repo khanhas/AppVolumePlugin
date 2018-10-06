@@ -1,0 +1,21 @@
+﻿{
+    "name":  "AppVolume Example Skins",
+    "author":  "khanhas",
+    "version":  "1.2.0",
+    "minimumVersion":  "4.1",
+    "minimumWindows":  "5.1",
+    "output":  "./dist/AppVolume_1.2.0.rmskin",
+    "skinDir":  "../AppVolumeExampleSkin",
+    "configPrefix":  "AppVolumeExample",
+    "headerImage":  "./header.bmp",
+    "loadType":  "Skin",
+    "load":  "AppVolumeExample\\AppVolumeExampleSkin.ini",
+    "variableFiles":  "",
+    "plugins":  [
+                    {
+                        "name":  "AppVolume.dll",
+                        "x86":  ".\\bin\\x86\\AppVolume.dll",
+                        "x64":  ".\\bin\\x64\\AppVolume.dll"
+                    }
+                ]
+}
