@@ -1,200 +1,82 @@
-#include <windows.h>
-#include <string>
-#include <Audiopolicy.h>
-#include <Mmdeviceapi.h>
-#include <Endpointvolume.h>
-#include <Functiondiscoverykeys_devpkey.h>
-#include <Shlwapi.h>
-#include <Psapi.h>
-#include <vector>
+#include "AppVolume.h"
 #include "RainmeterAPI.h"
-#include <Strsafe.h>
-#include <algorithm>
 
-#define SAFE_RELEASE(punk)  \
-			  if ((punk) != nullptr) { (punk)->Release(); (punk) = nullptr; }
-enum IndexType
-{
-	NOINDEXTYPE,
-	NUMBER,
-	APPNAME
-};
-enum NumberType
-{
-	NONUMTYPE,
-	PEAK,
-	VOLUME
-};
+BOOL ParentMeasure::isCOMInitialized = FALSE;
+IMMDeviceEnumerator * ParentMeasure::pEnumerator = nullptr;
 
-enum StringType
-{
-	NOSTRTYPE,
-	FILEPATH,
-	FILENAME,
-	ICONPATH
-};
-
-struct ChildMeasure;
-struct AppSession;
-
-struct ParentMeasure
-{
-	void* skin;
-	void* rm;
-	LPCWSTR name;
-	BOOL initErr;
-	ChildMeasure* ownerChild;
-	BOOL ignoreSystemSound;
-	std::vector<AppSession> SessionCollection;
-	std::vector<std::wstring> excludeList;
-	ParentMeasure() :
-		skin(nullptr),
-		name(),
-		ownerChild(nullptr),
-		initErr(true),
-		ignoreSystemSound(true)
-	{
-	}
-};
-
-struct ChildMeasure
-{
-	ParentMeasure* parent;
-	IndexType indexType;
-	NumberType numtype;
-	StringType strtype;
-	BOOL isParent;
-	int indexNum;
-	std::wstring indexApp;
-	ChildMeasure() :
-		indexType(NOINDEXTYPE),
-		numtype(NONUMTYPE),
-		strtype(NOSTRTYPE),
-		isParent(false),
-		indexNum(1),
-		indexApp(L"")
-	{
-	}
-};
-
-struct AppSession
-{
-	std::vector<IAudioMeterInformation *> peak;
-	std::vector<ISimpleAudioVolume *> volume;
-	std::vector<DWORD> processID;
-	BOOL mute;
-	std::wstring appPath = L"";
-	std::wstring appName = L"";
-	GUID groupID;
-};
-
-static BOOL com_initialized = FALSE;
-const static CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
-const static IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
-const static IID IID_SessionManager2 = __uuidof(IAudioSessionManager2);
-BOOL InitCom(ParentMeasure* measure);
-BOOL UpdateList(ParentMeasure* measure);
-void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList);
-IMMDeviceEnumerator * pEnumerator = nullptr;
-std::wstring deviceName;
-
-std::vector<ParentMeasure*> g_ParentMeasures;
-
-BOOL InitCom(ParentMeasure* measure)
-{
-	if (!com_initialized) com_initialized = SUCCEEDED(CoInitialize(0));
-	if (!com_initialized)
-	{
-		RmLog(LOG_ERROR, L"AppVolume.dll: COM initialization failed");
-		return false;
-	}
-
-	if (FAILED(CoCreateInstance(CLSID_MMDeviceEnumerator, 0, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void**)&pEnumerator)))
-	{
-		RmLog(LOG_ERROR, L"AppVolume.dll: COM creation failed");
-		return false;
-	}
-	
-	if (FAILED(UpdateList(measure)))
-		return false;
-
-	CoUninitialize();
-	com_initialized = FALSE;
-	return true;
-}
-
-PLUGIN_EXPORT void Initialize(void** data, void* rm)
-{
-	ChildMeasure* child = new ChildMeasure;
-	*data = child;
-
-	void* skin = RmGetSkin(rm);
-	
-	std::wstring parentName = RmReadString(rm, L"Parent", L"");
-	if (parentName.empty())
-	{
-		child->parent = new ParentMeasure;
-		child->parent->name = RmGetMeasureName(rm);
-		child->parent->skin = skin;
-		child->parent->rm = rm;
-		child->parent->ownerChild = child;
-		g_ParentMeasures.push_back(child->parent);
-		child->isParent = true;
-	}
-	else
-	{
-		// Find parent using name AND the skin handle to be sure that it's the right one
-		std::vector<ParentMeasure*>::const_iterator iter = g_ParentMeasures.begin();
-		for (; iter != g_ParentMeasures.end(); ++iter)
-		{
-			if (_wcsicmp((*iter)->name, parentName.c_str()) == 0 &&
-				(*iter)->skin == skin)
-			{
-				child->parent = (*iter);
-				return;
-			}
-		}
-
-		RmLog(LOG_ERROR, L"AppVolume.dll: Invalid Parent=");
-	}
-}
+static std::vector<ParentMeasure*> parentCollection;
 
 void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList)
 {
-	std::wstring tempList = list;
-	size_t start = 0;
-	size_t end = tempList.find(L";", 0);
-	
-	while (end != std::wstring::npos)
-	{
-		start = tempList.find_first_not_of(L" \t\r\n", start);
-		std::wstring element = tempList.substr(start, end - start);
-		element.erase(element.find_last_not_of(L" \t\r\n") + 1);
+    std::wstring tempList = list;
+    size_t start = 0;
+    size_t end = tempList.find(L";", 0);
 
-		if (!element.empty())
-		{
-			vectorList.push_back(element);
-		}
-		start = end + 1;
-		end = tempList.find(L";", start);
-	}
+    while (end != std::wstring::npos)
+    {
+        start = tempList.find_first_not_of(L" \t\r\n", start);
+        std::wstring element = tempList.substr(start, end - start);
+        element.erase(element.find_last_not_of(L" \t\r\n") + 1);
 
-	if (start < tempList.length())
-	{
-		start = tempList.find_first_not_of(L" \t\r\n", start);
-		std::wstring element = tempList.substr(start, tempList.length() - start);
-		element.erase(element.find_last_not_of(L" \t\r\n") + 1);
+        if (!element.empty())
+        {
+            vectorList.push_back(element);
+        }
+        start = end + 1;
+        end = tempList.find(L";", start);
+    }
 
-		if (!element.empty())
-		{
-			vectorList.push_back(element);
-		}		
-	}
+    if (start < tempList.length())
+    {
+        start = tempList.find_first_not_of(L" \t\r\n", start);
+        std::wstring element = tempList.substr(start, tempList.length() - start);
+        element.erase(element.find_last_not_of(L" \t\r\n") + 1);
+
+        if (!element.empty())
+        {
+            vectorList.push_back(element);
+        }
+    }
 }
 
-void ClearSessionCollection(std::vector<AppSession> * collection)
+ParentMeasure::~ParentMeasure()
 {
-    for (auto &sessIter : *collection)
+    ClearSessions();
+    SAFE_RELEASE(pEnumerator);
+}
+
+BOOL ParentMeasure::InitializeCOM()
+{
+	if (!isCOMInitialized)
+        isCOMInitialized = SUCCEEDED(CoInitialize(0));
+
+	if (!isCOMInitialized)
+	{
+		RmLog(rm, LOG_ERROR, L"AppVolume.dll: COM initialization failed");
+		return false;
+	}
+
+	if (FAILED(CoCreateInstance(
+            CLSID_MMDeviceEnumerator,
+            0,
+            CLSCTX_ALL,
+            IID_IMMDeviceEnumerator,
+            (void**)&pEnumerator
+        )))
+	{
+		RmLog(rm, LOG_ERROR, L"AppVolume.dll: COM creation failed");
+		return false;
+	}
+
+	if (FAILED(UpdateList()))
+		return false;
+
+    return true;
+}
+
+void ParentMeasure::ClearSessions()
+{
+    for (auto &sessIter : sessionCollection)
     {
         for (auto &volIter : sessIter.volume)
             SAFE_RELEASE(volIter);
@@ -208,16 +90,16 @@ void ClearSessionCollection(std::vector<AppSession> * collection)
         sessIter.processID.clear();
     }
 
-    collection->clear();
-    collection->shrink_to_fit();
+    sessionCollection.clear();
+    sessionCollection.shrink_to_fit();
 }
 
-BOOL UpdateList(ParentMeasure* measure)
+BOOL ParentMeasure::UpdateList()
 {
 	IMMDevice * pDevice = nullptr;
     if (FAILED(pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice)))
     {
-        RmLog(LOG_DEBUG, L"AppVolume.dll: Could not get device");
+        RmLog(rm, LOG_DEBUG, L"AppVolume.dll: Could not get device");
         return false;
     }
 
@@ -225,7 +107,7 @@ BOOL UpdateList(ParentMeasure* measure)
     if (FAILED(pDevice->Activate(IID_SessionManager2, CLSCTX_ALL, NULL, (void**)&sessManager)))
     {
         SAFE_RELEASE(pDevice);
-        RmLog(LOG_DEBUG, L"AppVolume.dll: Could not activate AudioSessionManager");
+        RmLog(rm, LOG_DEBUG, L"AppVolume.dll: Could not activate AudioSessionManager");
         return false;
     }
 
@@ -242,19 +124,19 @@ BOOL UpdateList(ParentMeasure* measure)
 		SAFE_RELEASE(pProps);
 	}
 	SAFE_RELEASE(pDevice);
-			
+
 	IAudioSessionEnumerator * sessEnum = nullptr;
 
     if (FAILED(sessManager->GetSessionEnumerator(&sessEnum)))
     {
-        RmLog(LOG_DEBUG, L"AppVolume.dll: Could not enumerate AudioSessionManager");
+        RmLog(rm, LOG_DEBUG, L"AppVolume.dll: Could not enumerate AudioSessionManager");
         SAFE_RELEASE(sessManager);
         return false;
     }
 
 	SAFE_RELEASE(sessManager);
-				
-    ClearSessionCollection(&measure->SessionCollection);
+
+    ClearSessions();
 
 	int sessionCount = 0;
 	sessEnum->GetCount(&sessionCount);
@@ -279,7 +161,7 @@ BOOL UpdateList(ParentMeasure* measure)
         SAFE_RELEASE(sessControl);
 
 		HRESULT isSystem = sessControl2->IsSystemSoundsSession();
-		if (measure->ignoreSystemSound && isSystem == S_OK)
+		if (ignoreSystemSound && isSystem == S_OK)
 		{
 			SAFE_RELEASE(sessControl2);
 			continue;
@@ -320,7 +202,7 @@ BOOL UpdateList(ParentMeasure* measure)
 			}
 
 			BOOL found = FALSE;
-			for (auto app : measure->excludeList)
+			for (auto app : excludeList)
 			{
 				if (_wcsicmp(newAppSession.appName.c_str(), app.c_str()) == 0)
 				{
@@ -336,9 +218,9 @@ BOOL UpdateList(ParentMeasure* measure)
 
 		GUID gID;
 		sessControl2->GetGroupingParam(&gID);
-					
+
 		BOOL found = FALSE;
-		for (auto &session : measure->SessionCollection)
+		for (auto &session : sessionCollection)
 		{
 			if (!IsEqualGUID(gID, session.groupID))
 			{
@@ -377,19 +259,19 @@ BOOL UpdateList(ParentMeasure* measure)
 			iterVolume->GetMute(&iterMute);
 			newAppSession.mute = iterMute;
 		}
-						
+
 		IAudioMeterInformation * iterPeak = nullptr;
 		if (SUCCEEDED(sessControl2->QueryInterface(&iterPeak)))
 			newAppSession.peak.push_back(iterPeak);
 
 		SAFE_RELEASE(sessControl2);
 
-		measure->SessionCollection.push_back(newAppSession);
+		sessionCollection.push_back(newAppSession);
 	}
 
 	SAFE_RELEASE(sessEnum);
 
-	for (auto &session : measure->SessionCollection)
+	for (auto &session : sessionCollection)
 	{
 		float maxVol = 0.0;
 		for (auto &volIter : session.volume)
@@ -411,9 +293,164 @@ BOOL UpdateList(ParentMeasure* measure)
 	return true;
 }
 
+BOOL ChildMeasure::IsOutOfRange()
+{
+    if (indexNum < 0 || indexNum >= (int)parent->sessionCollection.size())
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+int ChildMeasure::GetIndexFromName(std::wstring name)
+{
+    for (auto &session : parent->sessionCollection)
+    {
+        if (_wcsicmp(session.GetName(), name.c_str()) == 0)
+        {
+            return (int)(&session - &parent->sessionCollection[0]);
+            break;
+        }
+    }
+
+    return -1;
+}
+
+double ChildMeasure::GetAppVolume()
+{
+    if (IsOutOfRange())
+    {
+        return 0.0;
+    }
+
+    return parent->sessionCollection.at(indexNum).GetVolume();
+}
+
+double ChildMeasure::GetAppPeak()
+{
+    if (IsOutOfRange())
+    {
+        return 0.0;
+    }
+
+    return parent->sessionCollection.at(indexNum).GetPeak();
+}
+
+BOOL ChildMeasure::GetAppMute()
+{
+    if (IsOutOfRange())
+    {
+        return FALSE;
+    }
+
+    return parent->sessionCollection.at(indexNum).GetMute();
+}
+
+LPCWSTR ChildMeasure::GetAppPath()
+{
+    if (IsOutOfRange())
+    {
+        return L"";
+    }
+
+    return parent->sessionCollection.at(indexNum).GetPath();
+}
+
+LPCWSTR ChildMeasure::GetAppName()
+{
+    if (IsOutOfRange())
+    {
+        return L"";
+    }
+
+    return parent->sessionCollection.at(indexNum).GetName();
+}
+
+double AppSession::GetVolume()
+{
+    float value = 0.0;
+    for (auto &volumeIter : volume)
+    {
+        float sessVol;
+        volumeIter->GetMasterVolume(&sessVol);
+        if (sessVol > value)
+        {
+            value = sessVol;
+        }
+    }
+
+    return (double)value;
+}
+
+double AppSession::GetPeak()
+{
+    float value = 0.0;
+    for (auto &peakIter : peak)
+    {
+        float sessPeak;
+        peakIter->GetPeakValue(&sessPeak);
+        if (sessPeak > value)
+        {
+            value = sessPeak;
+        }
+    }
+
+    return (double)value;
+}
+
+BOOL AppSession::GetMute()
+{
+    return mute;
+}
+
+LPCWSTR AppSession::GetPath()
+{
+    return appPath.c_str();
+}
+
+LPCWSTR AppSession::GetName()
+{
+    return appName.c_str();
+}
+
+PLUGIN_EXPORT void Initialize(void** data, void* rm)
+{
+    ChildMeasure* child = new ChildMeasure;
+    *data = child;
+
+    child->rm = rm;
+
+    void* skin = RmGetSkin(rm);
+
+    std::wstring parentName = RmReadString(rm, L"Parent", L"");
+    if (parentName.empty())
+    {
+        child->parent = new ParentMeasure;
+        child->parent->name = RmGetMeasureName(rm);
+        child->parent->skin = skin;
+        parentCollection.push_back(child->parent);
+        child->isParent = true;
+    }
+    else
+    {
+        // Find parent using name AND the skin handle to be sure that it's the right one
+        for (auto &parent : parentCollection)
+        {
+            if (_wcsicmp(parent->name, parentName.c_str()) == 0 &&
+                parent->skin == skin)
+            {
+                child->parent = parent;
+                return;
+            }
+        }
+
+        RmLog(LOG_ERROR, L"AppVolume.dll: Invalid Parent=");
+    }
+}
+
 PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 {
-
 	ChildMeasure* child = (ChildMeasure*)data;
 	ParentMeasure* parent = child->parent;
 	if (!parent)
@@ -421,7 +458,7 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 
 	if (child->isParent)
 	{
-		child->parent->initErr = !InitCom(child->parent);
+        parent->InitializeCOM();
 		parent->ignoreSystemSound = RmReadInt(rm, L"IgnoreSystemSound", 1) == 1;
 		LPCWSTR excluding = RmReadString(rm, L"ExcludeApp", L"");
 		if (*excluding)
@@ -430,7 +467,7 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 		}
 		return;
 	}
-	
+
 	child->indexApp = RmReadString(rm, L"AppName", L"");
 	if (!child->indexApp.empty())
 	{
@@ -469,57 +506,39 @@ PLUGIN_EXPORT double Update(void* data)
 	if (!parent)
 		return 0.0;
 
-	if (parent->initErr)
+	if (parent->initError)
 	{
-		//Try again if calling InitCom() fail in Initialize()
-		parent->initErr = !InitCom(parent);
+		//Try again if calling InitializeCOM fails in Initialize
+		parent->initError = !parent->InitializeCOM();
 	}
 
 	if (child->isParent)
 	{
-		if (!UpdateList(parent))
+		if (!parent->UpdateList())
 		{
 			return 0.0;
 		}
-	}	
+	}
 	else
 	{
 		try
 		{
 			if (child->indexType == APPNAME)
-			{
-				for (int i = 0; i < parent->SessionCollection.size(); i++)
-				{
-					if (_wcsicmp(parent->SessionCollection.at(i).appName.c_str(),
-						child->indexApp.c_str()) == 0)
-					{
-						child->indexNum = i;
-						break;
-					}
-				}
-			}
+                child->indexNum = child->GetIndexFromName(child->indexApp);
+
 			switch (child->numtype)
 			{
 			case VOLUME:
 			{
-				float vol = 0.0;
-				parent->SessionCollection.at(child->indexNum).volume[0]->GetMasterVolume(&vol);
-				return (parent->SessionCollection.at(child->indexNum).mute ? -1 : (double)vol);
+                if (child->GetAppMute())
+                    return -1;
+
+                return child->GetAppVolume();
 			}
 
 			case PEAK:
 			{
-				float peak = 0.0;
-				for (auto &peakIter : parent->SessionCollection.at(child->indexNum).peak)
-				{
-					float sessPeak;
-					peakIter->GetPeakValue(&sessPeak);
-					if (sessPeak > peak)
-					{
-						peak = sessPeak;
-					}
-				}
-				return (double)peak;
+				return child->GetAppPeak();
 			}
 			}
 		}
@@ -528,7 +547,9 @@ PLUGIN_EXPORT double Update(void* data)
 			return 0.0;
 		}
 	}
-	return (double)parent->SessionCollection.size();
+
+    // Parent number value
+	return (double)parent->sessionCollection.size();
 }
 
 PLUGIN_EXPORT LPCWSTR GetString(void* data)
@@ -536,222 +557,267 @@ PLUGIN_EXPORT LPCWSTR GetString(void* data)
 	ChildMeasure* child = (ChildMeasure*)data;
 	ParentMeasure* parent = child->parent;
 
-	if (!parent || parent->initErr)
+	if (!parent || parent->initError)
 		return L"Error";
 
 	if (child->isParent)
 	{
-		return deviceName.c_str();
+		return parent->deviceName.c_str();
 	}
-		
 	else
 	{
-		try
-		{
-			switch (child->strtype)
-			{
-			case FILEPATH:
-				return parent->SessionCollection.at(child->indexNum).appPath.c_str();
-			case FILENAME:
-				return parent->SessionCollection.at(child->indexNum).appName.c_str();
-			}
-		}
-		catch (const std::out_of_range&)
-		{
-			return L"Index is out of range";
-		}
+        switch (child->strtype)
+        {
+        case FILEPATH:
+            return child->GetAppPath();
+        case FILENAME:
+            return child->GetAppName();
+        }
 	}
 
 	return nullptr;
 }
 
+BOOL IsValidParent(ChildMeasure * child, LPCWSTR functionName, LPCWSTR functionArg)
+{
+    if (!child->parent)
+    {
+        RmLogF(
+            child->rm,
+            LOG_DEBUG,
+            L"AppVolume.dll - %s(%s): Invalid measure.",
+            functionName,
+            functionArg);
+
+        return FALSE;
+    }
+
+    if (child->parent->initError)
+    {
+        RmLogF(
+            child->rm,
+            LOG_DEBUG,
+            L"AppVolume.dll - %s(%s): Parent is not initialized.",
+            functionName,
+            functionArg);
+
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+BOOL IsValidIndex(int index, ChildMeasure * child, LPCWSTR functionName, LPCWSTR functionArg)
+{
+    if (index == 0)
+    {
+        RmLogF(
+            child->rm,
+            LOG_DEBUG,
+            L"AppVolume.dll - GetVolumeFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.",
+            functionArg);
+
+        return FALSE;
+    }
+
+    if (index < 1 || index >(int)child->parent->sessionCollection.size())
+    {
+        RmLogF(
+            child->rm,
+            LOG_DEBUG,
+            L"AppVolume.dll - GetVolumeFromIndex(%d): Index is out of range",
+            index);
+
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 PLUGIN_EXPORT LPCWSTR GetVolumeFromIndex(void* data, const int argc, const WCHAR* argv[])
 {
-	ChildMeasure* child = (ChildMeasure*)data;
+    ChildMeasure* child = (ChildMeasure*)data;
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetVolumeFromIndex", argv[0]))
+    {
+        return nullptr;
+    }
+
 	if (argc == 1)
 	{
 		int index = _wtoi(argv[0]);
-		if (index == 0)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
-			return L"0";
-		}
-		try
-		{
-			float vol = 0.0;
-			child->parent->SessionCollection.at(index - 1).volume[0]->GetMasterVolume(&vol);
-			vol = (child->parent->SessionCollection.at(index - 1).mute ? -1 : vol);
-			static WCHAR result[7];
-			StringCchPrintf(result, 7, L"%f", vol);
-			return result;
-		}
-		catch (const std::out_of_range&)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(%d): Index is out of range", index);
-			return L"0";
-		}
+
+        if (!IsValidIndex(index, child, L"GetVolumeFromIndex", argv[0]))
+        {
+            return L"0";
+        }
+
+        index--;
+
+        AppSession* session = &parent->sessionCollection.at(index);
+		double vol = 0.0;
+        if (session->GetMute())
+            vol = -1;
+        else
+            vol = session->GetVolume();
+
+		static WCHAR result[7];
+		StringCchPrintf(result, 7, L"%f", vol);
+		return result;
 	}
-	RmLog(LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
+
+	RmLogF(child->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
 PLUGIN_EXPORT LPCWSTR GetPeakFromIndex(void* data, const int argc, const WCHAR* argv[])
 {
-	ChildMeasure* child = (ChildMeasure*)data;
+    ChildMeasure* child = (ChildMeasure*)data;
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetPeakFromIndex", argv[0]))
+    {
+        return nullptr;
+    }
+
 	if (argc == 1)
 	{
 		int index = _wtoi(argv[0]);
-		if (index == 0)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
-			return L"0";
-		}
-		try
-		{
-			float peak = 0.0;
-			for (auto &peakIter : child->parent->SessionCollection.at(index-1).peak)
-			{
-				float sessPeak;
-				peakIter->GetPeakValue(&sessPeak);
-				if (sessPeak > peak)
-				{
-					peak = sessPeak;
-				}
-			}
-			static WCHAR result[7];
-			StringCchPrintf(result, 7, L"%f", peak);
-			return result;
-		}
-		catch (const std::out_of_range&)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(%d): Index is out of range", index);
-			return L"0";
-		}
+
+        if (!IsValidIndex(index, child, L"GetPeakFromIndex", argv[0]))
+        {
+            return L"0";
+        }
+
+        index--;
+
+        double peak = parent->sessionCollection.at(index).GetPeak();
+		static WCHAR result[7];
+		StringCchPrintf(result, 7, L"%f", peak);
+		return result;
 	}
-	RmLog(LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
+    RmLog(child->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
 PLUGIN_EXPORT LPCWSTR GetFilePathFromIndex(void* data, const int argc, const WCHAR* argv[])
 {
-	ChildMeasure* child = (ChildMeasure*)data;
+    ChildMeasure* child = (ChildMeasure*)data;
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetFilePathFromIndex", argv[0]))
+    {
+        return nullptr;
+    }
+
 	if (argc == 1)
 	{
 		int index = _wtoi(argv[0]);
-		if (index == 0)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFilePathFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
-			return L"0";
-		}
-		try
-		{
-			return child->parent->SessionCollection.at(index - 1).appPath.c_str();
-		}
-		catch (const std::out_of_range&)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFilePathFromIndex(%d): Index is out of range", index);
-			return L"0";
-		}
+
+        if (!IsValidIndex(index, child, L"GetFilePathFromIndex", argv[0]))
+        {
+            return L"0";
+        }
+
+        index--;
+		return child->parent->sessionCollection.at(index).GetPath();
 	}
-	RmLog(1, L"AppVolume.dll - GetFilePathFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
+
+    RmLog(child->rm, LOG_DEBUG, L"AppVolume.dll - GetFilePathFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
 PLUGIN_EXPORT LPCWSTR GetFileNameFromIndex(void* data, const int argc, const WCHAR* argv[])
 {
-	ChildMeasure* child = (ChildMeasure*)data;
+    ChildMeasure* child = (ChildMeasure*)data;
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetFileNameFromIndex", argv[0]))
+    {
+        return nullptr;
+    }
+
 	if (argc == 1)
 	{
 		int index = _wtoi(argv[0]);
-		if (index == 0)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(%s): Incorrect type or out of range. Please use one integer and >= 1.", argv[0]);
-			return L"0";
-		}
-		try
-		{
-			return child->parent->SessionCollection.at(index - 1).appName.c_str();
-		}
-		catch (const std::out_of_range&)
-		{
-			RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(%d): Index is out of range", index);
-			return L"0";
-		}
+
+        if (!IsValidIndex(index, child, L"GetFileNameFromIndex", argv[0]))
+        {
+            return L"0";
+        }
+
+        index--;
+        return child->parent->sessionCollection.at(index).GetName();
 	}
-	RmLog(LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
+
+    RmLog(child->rm, LOG_DEBUG, L"AppVolume.dll - GetFileNameFromIndex(...): Incorrect number of parameters. Please use one integer and >= 1.");
 	return L"0";
 }
 
 PLUGIN_EXPORT LPCWSTR GetVolumeFromAppName(void* data, const int argc, const WCHAR* argv[])
 {
-	ChildMeasure* child = (ChildMeasure*)data;
+    ChildMeasure* child = (ChildMeasure*)data;
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetVolumeFromAppName", argv[0]))
+    {
+        return nullptr;
+    }
+
 	if (argc == 1)
 	{
-		for (int i = 0; i < child->parent->SessionCollection.size(); i++)
-		{
-            PCWSTR appName = child->parent->SessionCollection.at(i).appName.c_str();
-			if (_wcsicmp(appName, argv[0]) == 0)
-			{
-				try
-				{
-					float vol = 0.0;
-                    child->parent->SessionCollection.at(i).volume[0]->GetMasterVolume(&vol);
-					vol = (child->parent->SessionCollection.at(i).mute ? -1 : vol);
-					static WCHAR result[7];
-					StringCchPrintf(result, 7, L"%f", vol);
-					return result;
-				}
-				catch (const std::out_of_range&)
-				{
-					RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
-					return L"0";
-				}
-			}
-		}
-		RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
-		return L"0";
+        int index = child->GetIndexFromName(argv[0]);
+        if (index == -1)
+        {
+            RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(%s): Could not find app.", argv[0]);
+            return L"0";
+        }
+
+        AppSession* session = &parent->sessionCollection.at(index);
+        double vol = 0.0;
+        if (session->GetMute())
+            vol = -1;
+        else
+            vol = session->GetVolume();
+
+        static WCHAR result[7];
+        StringCchPrintf(result, 7, L"%f", vol);
+        return result;
 	}
-	RmLog(LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(...): Incorrect number of parameters. Please use one string.");
+
+    RmLog(child->rm, LOG_DEBUG, L"AppVolume.dll - GetVolumeFromAppName(...): Incorrect number of parameters. Please use one string.");
 	return L"0";
 }
 
 PLUGIN_EXPORT LPCWSTR GetPeakFromAppName(void* data, const int argc, const WCHAR* argv[])
 {
 	ChildMeasure* child = (ChildMeasure*)data;
-	if (argc == 1)
+    ParentMeasure* parent = child->parent;
+
+    if (!IsValidParent(child, L"GetPeakFromAppName", argv[0]))
+    {
+        return nullptr;
+    }
+
+    if (argc == 1)
 	{
-		for (int i = 0; i < child->parent->SessionCollection.size(); i++)
-		{
-            PCWSTR appName = child->parent->SessionCollection.at(i).appName.c_str();
-			if (_wcsicmp(appName, argv[0]) == 0)
-			{
-				try
-				{
-					float peak = 0.0;
-					for (auto &peakIter : child->parent->SessionCollection.at(i).peak)
-					{
-						float sessPeak;
-						peakIter->GetPeakValue(&sessPeak);
-						if (sessPeak > peak)
-						{
-							peak = sessPeak;
-						}
-					}
-					static WCHAR result[7];
-					StringCchPrintf(result, 7, L"%f", peak);
-					return result;
-				}
-				catch (const std::out_of_range&)
-				{
-					RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
-					return L"0";
-				}
-			}
-		}
-		RmLogF(child->parent->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
-		return L"0";
+        int index = child->GetIndexFromName(argv[0]);
+        if (index == -1)
+        {
+            RmLogF(child->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(%s): Could not find app.", argv[0]);
+            return L"0";
+        }
+
+        AppSession* session = &parent->sessionCollection.at(index);
+        double peak = session->GetPeak();
+
+        static WCHAR result[7];
+        StringCchPrintf(result, 7, L"%f", peak);
+        return result;
 	}
-	RmLog(LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(...): Incorrect number of parameters. Please use one string.");
+
+	RmLogF(child->rm, LOG_DEBUG, L"AppVolume.dll - GetPeakFromAppName(...): Incorrect number of parameters. Please use one string.");
 	return L"0";
 }
 
@@ -759,101 +825,140 @@ PLUGIN_EXPORT LPCWSTR GetPeakFromAppName(void* data, const int argc, const WCHAR
 PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
 {
 	ChildMeasure* child = (ChildMeasure*)data;
-	ParentMeasure* parent = child->parent;
+    ParentMeasure* parent = child->parent;
+    if (!parent)
+    {
+        RmLogF(child->rm, LOG_ERROR, L"AppVolume.dll - Bang \"%s\": Invalid measure.", args);
+        return;
+    }
+
+    if (parent->initError)
+    {
+        RmLogF(child->rm, LOG_ERROR, L"AppVolume.dll - Bang \"%s\": Parent is not initialized.", args);
+        return;
+    }
+
+    if (child->isParent)
+    {
+        if (_wcsicmp(args, L"Update") == 0)
+        {
+            Reload(data, parent->rm, NULL);
+        }
+        else
+        {
+            RmLog(child->rm, LOG_WARNING, L"AppVolume.dll: Unknown bang");
+        }
+        return;
+    }
+
+    if (child->IsOutOfRange())
+    {
+        RmLog(child->rm, LOG_ERROR, L"AppVolume.dll: Child measure index is out of range");
+        return;
+    }
+
+    AppSession* session = &parent->sessionCollection.at(child->indexNum);
 
 	if (_wcsicmp(args, L"Mute") == 0)
 	{
 		try
 		{
-			for (auto &volIter : parent->SessionCollection.at(child->indexNum).volume)
+			for (auto &volIter : session->volume)
 			{
-				if (FAILED(volIter->SetMute(true, NULL)))
+				if (FAILED(volIter->SetMute(TRUE, NULL)))
 					throw "error";
 			}
 		}
 		catch (...)
 		{
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error muting app");
+			RmLog(child->rm, LOG_ERROR, L"AppVolume.dll: Error muting app");
 		}
 	}
 	else if (_wcsicmp(args, L"UnMute") == 0)
 	{
 		try
 		{
-			for (auto &volIter : parent->SessionCollection.at(child->indexNum).volume)
+			for (auto &volIter : session->volume)
 			{
-				if (FAILED(volIter->SetMute(false, NULL)))
+				if (FAILED(volIter->SetMute(FALSE, NULL)))
 					throw "error";
 			}
 		}
 		catch (...)
 		{
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error unmuting app");
+            RmLog(child->rm, LOG_ERROR, L"AppVolume.dll: Error unmuting app");
 		}
 	}
 	else if (_wcsicmp(args, L"ToggleMute") == 0)
 	{
 		try
 		{
-			BOOL curMute = parent->SessionCollection.at(child->indexNum).mute;
-			for (auto &volIter : parent->SessionCollection.at(child->indexNum).volume)
+			BOOL newMuteState = !session->GetMute();
+			for (auto &volIter : session->volume)
 			{
-				if (FAILED(volIter->SetMute(!curMute, NULL)))
+				if (FAILED(volIter->SetMute(newMuteState, NULL)))
 					throw "error";
 			}
-			parent->SessionCollection.at(child->indexNum).mute = !curMute;
+
+			session->mute = newMuteState;
 		}
 		catch (...)
 		{
-			RmLog(LOG_ERROR, L"AppVolume.dll: Error toggling mute app");
+            RmLog(child->rm, LOG_ERROR, L"AppVolume.dll: Error toggling mute app");
 		}
 	}
 	else if (_wcsicmp(args, L"Update") == 0)
 	{
-		Reload(data, parent->rm, NULL);
+        Reload(data, child->rm, NULL);
 	}
 	else
 	{
 		LPCWSTR arg = wcschr(args, L' ');
-		if (_wcsnicmp(args, L"SetVolume", 9) == 0)
+		if (_wcsnicmp(args, L"SetVolume", 9) == 0
+         || _wcsnicmp(args, L"ChangeVolume", 12) == 0)
 		{
 			try
 			{
-				float argNum = (float)_wtof(arg);
-				float volume = 0.0;
+				double argNum = _wtof(arg);
+                double volume = 0.0;
 				if (arg[1] == L'+' || arg[1] == L'-')
 				{
-					// Relative to current volume
-					if (FAILED(parent->SessionCollection.at(child->indexNum).volume[0]->GetMasterVolume(&volume)))
-						throw "error";
+                    volume = session->GetVolume();
 
 					volume += argNum / 100;
 				}
-				else
+                else
+                {
 					volume = argNum / 100;
+                }
+
 				if (volume < 0)
 					volume = 0.0;
 				else if (volume > 1)
 					volume = 1.0;
-				BOOL curMute;
-				parent->SessionCollection.at(child->indexNum).volume[0]->GetMute(&curMute);
-				for (auto &volIter : parent->SessionCollection.at(child->indexNum).volume)
+
+				BOOL curMute = session->GetMute();
+
+				for (auto &volIter : session->volume)
 				{
-					if (FAILED(volIter->SetMasterVolume(volume, NULL)))
+					if (FAILED(volIter->SetMasterVolume((float)volume, NULL)))
 						throw "error";
+
 					if (curMute)
 						if (FAILED(volIter->SetMute(FALSE, NULL)))
 							throw "error";
 				}
-					
+
 			}
 			catch (...)
 			{
-				RmLog(LOG_ERROR, L"AppVolume.dll: Error setting volume");
+                RmLog(child->rm, LOG_ERROR, L"AppVolume.dll: Error setting volume");
 			}
 		}
-		else
-			RmLog(LOG_WARNING, L"AppVolume.dll: Unknown bang");
+        else
+        {
+            RmLog(child->rm, LOG_WARNING, L"AppVolume.dll: Unknown bang");
+        }
 	}
 }
 
@@ -861,16 +966,28 @@ PLUGIN_EXPORT void Finalize(void* data)
 {
 	ChildMeasure* child = (ChildMeasure*)data;
 	ParentMeasure* parent = child->parent;
-	if (parent && parent->ownerChild == child)
+	if (parent && child->isParent)
 	{
-		std::vector<ParentMeasure*>::iterator iter = std::find(g_ParentMeasures.begin(), g_ParentMeasures.end(), parent);
-		g_ParentMeasures.erase(iter);
-        ClearSessionCollection(&parent->SessionCollection);
-		SAFE_RELEASE(pEnumerator);
+        auto parentIter = std::find(
+            parentCollection.begin(),
+            parentCollection.end(),
+            parent);
+
+        parentCollection.erase(parentIter);
+
 		delete parent;
+
+        if (parentCollection.size() == 0)
+        {
+            if (ParentMeasure::isCOMInitialized)
+            {
+                CoUninitialize();
+                ParentMeasure::isCOMInitialized = FALSE;
+            }
+
+            SAFE_RELEASE(ParentMeasure::pEnumerator);
+        }
 	}
 
 	delete child;
-	if (com_initialized) CoUninitialize();
-	com_initialized = FALSE;
 }
