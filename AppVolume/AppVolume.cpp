@@ -42,7 +42,6 @@ void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList)
 ParentMeasure::~ParentMeasure()
 {
     ClearSessions();
-    SAFE_RELEASE(pEnumerator);
 }
 
 BOOL ParentMeasure::InitializeCOM()
@@ -56,7 +55,8 @@ BOOL ParentMeasure::InitializeCOM()
         return false;
     }
 
-    if (FAILED(CoCreateInstance(
+    if (pEnumerator == nullptr
+	 && FAILED(CoCreateInstance(
             CLSID_MMDeviceEnumerator,
             0,
             CLSCTX_ALL,
