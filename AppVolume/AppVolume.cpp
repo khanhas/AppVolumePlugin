@@ -56,7 +56,7 @@ BOOL ParentMeasure::InitializeCOM()
     }
 
     if (pEnumerator == nullptr
-	 && FAILED(CoCreateInstance(
+     && FAILED(CoCreateInstance(
             CLSID_MMDeviceEnumerator,
             0,
             CLSCTX_ALL,
@@ -178,28 +178,26 @@ BOOL ParentMeasure::UpdateList()
         }
         else
         {
-            HANDLE checkProc = OpenProcess(PROCESS_ALL_ACCESS, false, procID);
+            HANDLE checkProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, procID);
             WCHAR procPath[400];
-            procPath[0] = 0;
+            DWORD copied = (DWORD)0;
             if (checkProc != NULL)
             {
-                GetModuleFileNameEx(checkProc, NULL, procPath, 400);
+                copied = GetModuleFileNameEx(checkProc, NULL, procPath, 400);
             }
             CloseHandle(checkProc);
 
             //Windows 7 doesn't kill session when process is closed.
             //And it leaves various "ghost" processID that can't be get path.
             //Use that to skip these kind of sessions.
-            if (procPath[0] == 0)
+            if (copied == (DWORD)0)
             {
                 SAFE_RELEASE(sessControl2);
                 continue;
             }
-            else
-            {
-                newAppSession.appPath = procPath;
-                newAppSession.appName = PathFindFileName(newAppSession.appPath.c_str());
-            }
+
+            newAppSession.appPath = procPath;
+            newAppSession.appName = PathFindFileName(newAppSession.appPath.c_str());
 
             BOOL found = FALSE;
             for (auto app : excludeList)
