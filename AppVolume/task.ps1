@@ -1,4 +1,7 @@
 $msbuild = "E:\VisualStudio\MSBuild\15.0\Bin\MSBuild.exe"
+Write-Host "Current version: " -n -f ([ConsoleColor]::Green)
+Write-Host (Get-Content ".\skinDefinition.json" | ConvertFrom-Json).version
+
 function Build
 {
     param(

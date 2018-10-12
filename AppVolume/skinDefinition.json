@@ -1,10 +1,10 @@
 ﻿{
     "name":  "AppVolume Example Skins",
     "author":  "khanhas",
-    "version":  "1.2.2",
+    "version":  "1.2.3",
     "minimumVersion":  "4.1",
     "minimumWindows":  "5.1",
-    "output":  "./dist/AppVolume_1.2.2.rmskin",
+    "output":  "./dist/AppVolume_1.2.3.rmskin",
     "skinDir":  "../AppVolumeExampleSkin",
     "configPrefix":  "AppVolumeExample",
     "headerImage":  "./header.bmp",
