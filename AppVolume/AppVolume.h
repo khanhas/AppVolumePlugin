@@ -1,5 +1,7 @@
 #pragma once
 #include <windows.h>
+#include <commctrl.h>
+#include <commoncontrols.h>
 
 #include <Endpointvolume.h>
 #include <Audiopolicy.h>
@@ -42,6 +44,14 @@ enum StringType
     ICONPATH
 };
 
+enum class IconSize
+{
+    IS_SMALL = 1,	// 16x16
+    IS_MEDIUM = 0,	// 32x32
+    IS_LARGE = 2,	// 48x48
+    IS_EXLARGE = 4	// 256x256
+};
+
 class AppSession
 {
 public:
@@ -77,13 +87,17 @@ public:
     BOOL ignoreSystemSound;
     std::vector<AppSession> sessionCollection;
     std::vector<std::wstring> excludeList;
+    std::wstring saveIcons;
+    IconSize iconSize;
 
     ParentMeasure() :
         skin(nullptr),
         rm(nullptr),
         initError(FALSE),
         name(nullptr),
-        ignoreSystemSound(true)
+        ignoreSystemSound(true),
+        saveIcons(),
+        iconSize(IconSize::IS_LARGE)
     {};
 
     ~ParentMeasure();
@@ -128,3 +142,5 @@ public:
 void SeparateList(LPCWSTR list, std::vector<std::wstring> &vectorList);
 BOOL IsValidParent(ChildMeasure * child, LPCWSTR functionName, LPCWSTR functionArg);
 BOOL IsValidIndex(int index, ChildMeasure * child, LPCWSTR functionName, LPCWSTR functionArg);
+void GetIcon(std::wstring filePath, const std::wstring& iconPath, IconSize iconSize);
+bool SaveIcon(HICON hIcon, FILE* fp);
