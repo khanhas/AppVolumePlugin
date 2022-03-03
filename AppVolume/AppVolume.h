@@ -121,6 +121,8 @@ public:
     std::wstring indexApp;
 
     ChildMeasure() :
+        parent(),
+        rm(),
         indexType(NOINDEXTYPE),
         numtype(NONUMTYPE),
         strtype(NOSTRTYPE),

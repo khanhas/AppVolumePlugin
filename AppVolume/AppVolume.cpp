@@ -296,16 +296,7 @@ BOOL ParentMeasure::UpdateList()
 
     for (auto &session : sessionCollection)
     {
-        auto fileExists = [](std::wstring fileName) -> bool {
-            FILE* f;
-            _wfopen_s(&f, fileName.c_str(), L"r");
-            if (f != nullptr) {
-                fclose(f);
-                return true;
-            }
-            return false;
-        };
-        if (!saveIcons.empty() && fileExists(saveIcons + session.appName + L".png")) {
+        if (!saveIcons.empty() && !PathFileExists((saveIcons + session.appName + L".png").c_str())) {
             GetIcon(session.appPath, saveIcons + session.appName + L".png", iconSize);
         }
         float maxVol = 0.0;
