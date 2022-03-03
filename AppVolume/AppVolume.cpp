@@ -1,5 +1,30 @@
 #include "AppVolume.h"
-#include "RainmeterAPI.h"
+#include "API\RainmeterAPI.h"
+#include <stdexcept>
+
+#define INVALID_FILE L"/<>\\"
+
+#pragma pack(push, 2)
+typedef struct	// 16 bytes
+{
+    BYTE        bWidth;				// Width, in pixels, of the image
+    BYTE        bHeight;			// Height, in pixels, of the image
+    BYTE        bColorCount;		// Number of colors in image (0 if >=8bpp)
+    BYTE        bReserved;			// Reserved ( must be 0)
+    WORD        wPlanes;			// Color Planes
+    WORD        wBitCount;			// Bits per pixel
+    DWORD       dwBytesInRes;		// How many bytes in this resource?
+    DWORD       dwImageOffset;		// Where in the file is this image?
+} ICONDIRENTRY, * LPICONDIRENTRY;
+
+typedef struct	// 22 bytes
+{
+    WORD           idReserved;		// Reserved (must be 0)
+    WORD           idType;			// Resource Type (1 for icons)
+    WORD           idCount;			// How many images?
+    ICONDIRENTRY   idEntries[1];	// An entry for each image (idCount of 'em)
+} ICONDIR, * LPICONDIR;
+#pragma pack(pop)
 
 BOOL ParentMeasure::isCOMInitialized = FALSE;
 IMMDeviceEnumerator * ParentMeasure::pEnumerator = nullptr;
@@ -271,6 +296,9 @@ BOOL ParentMeasure::UpdateList()
 
     for (auto &session : sessionCollection)
     {
+        if (!saveIcons.empty() && !PathFileExists((saveIcons + session.appName + L".png").c_str())) {
+            GetIcon(session.appPath, saveIcons + session.appName + L".png", iconSize);
+        }
         float maxVol = 0.0;
         for (auto &volIter : session.volume)
         {
@@ -458,6 +486,26 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
     {
         parent->InitializeCOM();
         parent->ignoreSystemSound = RmReadInt(rm, L"IgnoreSystemSound", 1) == 1;
+        std::wstring saveIcons = RmReadPath(rm, L"IconsPath", L"");
+        if (saveIcons.find_last_of(L'\\') != saveIcons.length()) {
+            saveIcons += L'\\';
+        }
+        parent->saveIcons = saveIcons;
+        int iconSize = RmReadInt(rm, L"IconSize", 48);
+        switch (iconSize)
+        {
+        case 16:
+            parent->iconSize = IconSize::IS_SMALL;
+            break;
+        case 32:
+            parent->iconSize = IconSize::IS_MEDIUM;
+            break;
+        case 256:
+            parent->iconSize = IconSize::IS_EXLARGE;
+            break;
+        default:
+            break;
+        }
         LPCWSTR excluding = RmReadString(rm, L"ExcludeApp", L"");
         if (*excluding)
         {
@@ -988,4 +1036,136 @@ PLUGIN_EXPORT void Finalize(void* data)
     }
 
     delete child;
+}
+
+
+// copied from file view plugin
+void GetIcon(std::wstring filePath, const std::wstring& iconPath, IconSize iconSize)
+{
+    SHFILEINFO shFileInfo;
+    HICON icon = nullptr;
+    HIMAGELIST* hImageList = nullptr;
+    FILE* fp = nullptr;
+
+    // Special case for .url files
+    if (filePath.size() > 3 && _wcsicmp(filePath.substr(filePath.size() - 4).c_str(), L".URL") == 0)
+    {
+        WCHAR buffer[MAX_PATH] = L"";
+        GetPrivateProfileString(L"InternetShortcut", L"IconFile", L"", buffer, sizeof(buffer), filePath.c_str());
+        if (*buffer)
+        {
+            std::wstring file = buffer;
+            int iconIndex = 0;
+
+            GetPrivateProfileString(L"InternetShortcut", L"IconIndex", L"-1", buffer, sizeof(buffer), filePath.c_str());
+            if (buffer != L"-1")
+            {
+                iconIndex = _wtoi(buffer);
+            }
+
+            int size = 48;
+            switch (iconSize) {
+            case IconSize::IS_SMALL:
+                size = 16;
+            case IconSize::IS_MEDIUM:
+                size = 32;
+            case IconSize::IS_EXLARGE:
+                size = 256;
+            }
+
+            PrivateExtractIcons(file.c_str(), iconIndex, size, size, &icon, nullptr, 1, LR_LOADTRANSPARENT);
+        }
+    }
+
+    if (icon == nullptr)
+    {
+        SHGetFileInfo(filePath.c_str(), 0, &shFileInfo, sizeof(shFileInfo), SHGFI_SYSICONINDEX);
+        SHGetImageList((int)iconSize, IID_IImageList, (void**)&hImageList);
+        ((IImageList*)hImageList)->GetIcon(shFileInfo.iIcon, ILD_TRANSPARENT, &icon);
+    }
+
+    errno_t error = _wfopen_s(&fp, iconPath.c_str(), L"wb");
+    if (filePath == INVALID_FILE || icon == nullptr || (error == 0 && !SaveIcon(icon, fp)))
+    {
+        fwrite(iconPath.c_str(), 1, 1, fp);		// Clears previous icon
+        fclose(fp);
+    }
+
+    DestroyIcon(icon);
+}
+
+bool SaveIcon(HICON hIcon, FILE* fp)
+{
+    ICONINFO iconInfo;
+    BITMAP bmColor;
+    BITMAP bmMask;
+    if (!fp || nullptr == hIcon || !GetIconInfo(hIcon, &iconInfo) ||
+        !GetObject(iconInfo.hbmColor, sizeof(bmColor), &bmColor) ||
+        !GetObject(iconInfo.hbmMask, sizeof(bmMask), &bmMask))
+        return false;
+
+    // support only 16/32 bit icon now
+    if (bmColor.bmBitsPixel != 16 && bmColor.bmBitsPixel != 32)
+        return false;
+
+    HDC dc = GetDC(nullptr);
+    BYTE bmiBytes[sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD)];
+    BITMAPINFO* bmi = (BITMAPINFO*)bmiBytes;
+
+    // color bits
+    memset(bmi, 0, sizeof(BITMAPINFO));
+    bmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    GetDIBits(dc, iconInfo.hbmColor, 0, bmColor.bmHeight, nullptr, bmi, DIB_RGB_COLORS);
+    int colorBytesCount = bmi->bmiHeader.biSizeImage;
+    BYTE* colorBits = new BYTE[colorBytesCount];
+    GetDIBits(dc, iconInfo.hbmColor, 0, bmColor.bmHeight, colorBits, bmi, DIB_RGB_COLORS);
+
+    // mask bits
+    memset(bmi, 0, sizeof(BITMAPINFO));
+    bmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    GetDIBits(dc, iconInfo.hbmMask, 0, bmMask.bmHeight, nullptr, bmi, DIB_RGB_COLORS);
+    int maskBytesCount = bmi->bmiHeader.biSizeImage;
+    BYTE* maskBits = new BYTE[maskBytesCount];
+    GetDIBits(dc, iconInfo.hbmMask, 0, bmMask.bmHeight, maskBits, bmi, DIB_RGB_COLORS);
+
+    ReleaseDC(nullptr, dc);
+
+    // icon data
+    BITMAPINFOHEADER bmihIcon;
+    memset(&bmihIcon, 0, sizeof(bmihIcon));
+    bmihIcon.biSize = sizeof(BITMAPINFOHEADER);
+    bmihIcon.biWidth = bmColor.bmWidth;
+    bmihIcon.biHeight = bmColor.bmHeight * 2;	// icXOR + icAND
+    bmihIcon.biPlanes = bmColor.bmPlanes;
+    bmihIcon.biBitCount = bmColor.bmBitsPixel;
+    bmihIcon.biSizeImage = colorBytesCount + maskBytesCount;
+
+    // icon header
+    ICONDIR dir;
+    dir.idReserved = 0;		// must be 0
+    dir.idType = 1;			// 1 for icons
+    dir.idCount = 1;
+    dir.idEntries[0].bWidth = (BYTE)bmColor.bmWidth;
+    dir.idEntries[0].bHeight = (BYTE)bmColor.bmHeight;
+    dir.idEntries[0].bColorCount = 0;		// 0 if >= 8bpp
+    dir.idEntries[0].bReserved = 0;		// must be 0
+    dir.idEntries[0].wPlanes = bmColor.bmPlanes;
+    dir.idEntries[0].wBitCount = bmColor.bmBitsPixel;
+    dir.idEntries[0].dwBytesInRes = sizeof(bmihIcon) + bmihIcon.biSizeImage;
+    dir.idEntries[0].dwImageOffset = sizeof(ICONDIR);
+
+    fwrite(&dir, sizeof(dir), 1, fp);
+    fwrite(&bmihIcon, sizeof(bmihIcon), 1, fp);
+    fwrite(colorBits, colorBytesCount, 1, fp);
+    fwrite(maskBits, maskBytesCount, 1, fp);
+
+    // Clean up
+    DeleteObject(iconInfo.hbmColor);
+    DeleteObject(iconInfo.hbmMask);
+    delete[] colorBits;
+    delete[] maskBits;
+
+    fclose(fp);
+
+    return true;
 }
